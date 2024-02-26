@@ -3,45 +3,33 @@ package internal
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log"
+	"io"
 	"log/slog"
-
-	tradingpairs "crypto-order-book/go/internal/trading-pairs"
-)
-
-const (
-	snapshotUrlBtcUsdt = "https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000"
-	snapshotUrlEthUsdt = "https://fapi.binance.com/fapi/v1/depth?symbol=ETHUSDT&limit=1000"
+	"net/http"
+	"strings"
 )
 
 // TODO: Ensure storage layout
 type Handler struct {
 	snapshotLastUpdateId     int64
 	previousEventFinalUpdate int
-	tradingPair              tradingpairs.TradingPair
+	tradingPairOb            *OrderBook
 	snapshotUrl              string
+	pairSymbol               string
 	firstEventProcessed      bool
+	bestBid                  float64
+	bestAsk                  float64
 }
 
-func InitializeHandler(tpSymbol string) *Handler {
-	var snapshotUrl string
-	var tradingPair tradingpairs.TradingPair
-	switch tpSymbol {
-	case "btcusdt":
-		snapshotUrl = snapshotUrlBtcUsdt
-		tradingPair = tradingpairs.NewBtcUsdtPair()
-	case "ethusdt":
-		snapshotUrl = snapshotUrlEthUsdt
-		tradingPair = tradingpairs.NewEthUsdtPair()
-	}
-	snapshot := GetDepthSnapshot(snapshotUrl)
-	log.Println(fmt.Sprintf("Snapshot LastUpdateId for trading pair %s = %d \n", tpSymbol, snapshot.LastUpdateId))
+func InitializeHandler(tpSymbol string, snapshotUrl string) *Handler {
+	snapshot := getDepthSnapshot(snapshotUrl)
+	slog.Info("Snapshot taken", slog.String("Symbol", strings.ToUpper(tpSymbol)), slog.Int64("LastUpdateId", snapshot.LastUpdateId))
 	return &Handler{
 		snapshotLastUpdateId: snapshot.LastUpdateId,
-		tradingPair:          tradingPair,
+		tradingPairOb:        NewOrderBook(),
 		snapshotUrl:          snapshotUrl,
 		firstEventProcessed:  false,
+		pairSymbol:           tpSymbol,
 	}
 }
 
@@ -51,7 +39,7 @@ func (h *Handler) HandleUpdate(message []byte) error {
 		return err
 	}
 	if parseDepthUpdateEvent.Data.FinalUpdateId < h.snapshotLastUpdateId {
-		slog.Info(fmt.Sprintf("Discarding event with smaller last update id...\n"))
+		slog.Debug("Discarding event with smaller last update id...")
 		return nil
 	}
 	if (int(parseDepthUpdateEvent.Data.FinalUpdateIdLastStream) != h.previousEventFinalUpdate) && h.firstEventProcessed {
@@ -66,24 +54,56 @@ func (h *Handler) HandleUpdate(message []byte) error {
 		h.firstEventProcessed = true
 	}
 
-	//indentEventRecord, _ := json.MarshalIndent(parseDepthUpdateEvent, "", " ")
-	//n, err := f.Write(append(indentEventRecord, byte(',')))
-	//if err != nil {
-	//	log.Fatal("Error writing bytes ", err)
-	//}
-	//log.Println(fmt.Sprintf("wrote %d bytes\n", n))
-	//f.Sync()
+	bestAsk, tenthLevelAsk, err := h.tradingPairOb.UpdateAsks(parseDepthUpdateEvent.Data.AsksToBeUpdated)
+	if err != nil {
+		return err
+	}
+	bestBid, tenthLevelBid, err := h.tradingPairOb.UpdateBids(parseDepthUpdateEvent.Data.BidsToBeUpdated)
+	if err != nil {
+		return err
+	}
 
-	h.tradingPair.UpdateAsks(parseDepthUpdateEvent.Data.AsksToBeUpdated)
-	h.tradingPair.UpdateBids(parseDepthUpdateEvent.Data.BidsToBeUpdated)
+	slog.Info("Spread between 10th order book level", slog.Float64("Value", tenthLevelAsk-tenthLevelBid), slog.String("Symbol", strings.ToUpper(h.pairSymbol)))
+
+	h.bestBid = bestBid
+	h.bestAsk = bestAsk
 
 	h.previousEventFinalUpdate = int(parseDepthUpdateEvent.Data.FinalUpdateId)
 
 	return nil
 }
 
+func (h *Handler) GetBestBid() float64 {
+	return h.bestBid
+}
+
+func (h *Handler) GetBestAsk() float64 {
+	return h.bestAsk
+}
+
 func (h *Handler) reinitializeSnapshot() {
-	h.snapshotLastUpdateId = GetDepthSnapshot(h.snapshotUrl).LastUpdateId
-	slog.Debug(fmt.Sprintf("Snapshot LastUpdateId for trading pair %s UPDATED. \n", h.tradingPair.Symbol()),
-		slog.Int64("NewId", h.snapshotLastUpdateId))
+	h.snapshotLastUpdateId = getDepthSnapshot(h.snapshotUrl).LastUpdateId
+	slog.Info("Snapshot taken", slog.String("Symbol", h.pairSymbol),
+		slog.Int64("LastUpdateId", h.snapshotLastUpdateId))
+}
+
+func getDepthSnapshot(snapshotUrl string) *DepthSnapshot {
+	resp, err := http.Get(snapshotUrl)
+	if err != nil {
+		slog.Error("Error getting snapshot", slog.String("snapshotUrl", snapshotUrl))
+		return nil
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("Error reading snapshot response", slog.String("snapshotUrl", snapshotUrl))
+		return nil
+	}
+	snapshot := DepthSnapshot{}
+	err = json.Unmarshal(body, &snapshot)
+	if err != nil {
+		slog.Error("Error unmarshalling depth snapshot", slog.String("snapshotUrl", snapshotUrl))
+		return nil
+	}
+	return &snapshot
 }

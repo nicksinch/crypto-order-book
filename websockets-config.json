@@ -1,0 +1,11 @@
+{
+  "depth": "100ms",
+  "pairs": [
+    "wss://fstream.binance.com/stream?streams=btcusdt@depth@100ms",
+    "wss://fstream.binance.com/stream?streams=ethusdt@depth@100ms"
+  ],
+  "snapshots": [
+    "https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000",
+    "https://fapi.binance.com/fapi/v1/depth?symbol=ETHUSDT&limit=1000"
+  ]
+}

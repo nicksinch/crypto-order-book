@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -9,23 +11,21 @@ import (
 	"sync"
 	"time"
 
+	"crypto-order-book/go/config"
 	"crypto-order-book/go/internal"
 
 	"github.com/gorilla/websocket"
 )
 
 const (
-	btcUsdtWsEndpoint   = "wss://fstream.binance.com/stream?streams=btcusdt@depth@100ms"
-	ethUsdtWsEndpoint   = "wss://fstream.binance.com/stream?streams=ethusdt@depth@100ms"
-	depthEventsJsonPath = "/Users/nickkirov/GolandProjects/reflect-playground/cmd/order-book/binance-result.json"
-	prefixFStreamApi    = "wss://fstream.binance.com/stream?streams="
+	prefixFStreamApi = "wss://fstream.binance.com/stream?streams="
 )
 
 // connectToWebsocket connects to a single trading-pair websocket url
-func connectToWebsocket(u string, shutdown chan struct{}, wg *sync.WaitGroup) {
+func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	log.Printf("connecting to %s", u)
+	slog.Info(fmt.Sprintf("connecting to %s", u))
 	c, _, err := websocket.DefaultDialer.Dial(u, nil)
 	if err != nil {
 		log.Fatal("dial:", err)
@@ -46,7 +46,7 @@ func connectToWebsocket(u string, shutdown chan struct{}, wg *sync.WaitGroup) {
 		slog.Error("Couldn't cut suffix to take trading pair symbol")
 	}
 
-	eventHandler = internal.InitializeHandler(tpSymbol)
+	eventHandler = internal.InitializeHandler(tpSymbol, s)
 
 	go func() {
 		defer close(done)
@@ -56,10 +56,35 @@ func connectToWebsocket(u string, shutdown chan struct{}, wg *sync.WaitGroup) {
 				log.Println("read:", err)
 				return
 			}
-			log.Printf("recv: %s", message)
 			err = eventHandler.HandleUpdate(message)
 			if err != nil {
 				slog.Error("Error handling order book update", slog.Any("error", err.Error()))
+			}
+		}
+	}()
+
+	tickerMidPoint := time.NewTicker(time.Second)
+	defer tickerMidPoint.Stop()
+
+	tickerSma := time.NewTicker(60 * time.Second)
+	defer tickerSma.Stop()
+
+	simpleMovingAverageSum := 0.0
+	secondsCount := 0
+
+	go func() {
+		for {
+			select {
+			case <-tickerMidPoint.C:
+				bestAsk := eventHandler.GetBestAsk()
+				bestBid := eventHandler.GetBestBid()
+				midPointPrice := (bestAsk - bestBid) / 2
+				simpleMovingAverageSum += midPointPrice
+				secondsCount++
+			case <-tickerSma.C:
+				slog.Info("Simple Moving Average (SMA) for the last 60 seconds: ", slog.Float64("SMA", simpleMovingAverageSum/60), slog.String("Symbol", strings.ToUpper(tpSymbol)))
+				simpleMovingAverageSum = 0.0
+				secondsCount = 0
 			}
 		}
 	}()
@@ -72,7 +97,7 @@ func connectToWebsocket(u string, shutdown chan struct{}, wg *sync.WaitGroup) {
 		case <-done:
 			return
 		case <-ticker.C:
-			log.Printf("%v sending a unsolicited pong frame.", time.Now().Format(time.RFC3339))
+			slog.Debug(fmt.Sprintf("%v sending a unsolicited pong frame.", time.Now().Format(time.RFC3339)))
 			err := c.WriteMessage(websocket.PongMessage, nil)
 			if err != nil {
 				log.Println("write:", err)
@@ -96,23 +121,32 @@ func connectToWebsocket(u string, shutdown chan struct{}, wg *sync.WaitGroup) {
 }
 
 func run() error {
-	endpoints := []string{btcUsdtWsEndpoint, ethUsdtWsEndpoint}
+	wsConfig, err := config.InitializeConfig()
+	if err != nil {
+		return err
+	}
+	if len(wsConfig.Pairs) != len(wsConfig.Snapshots) {
+		return errors.New("each websocket url needs to have a snapshot url")
+	}
+
+	wsEndpoints := wsConfig.Pairs
+	snapshotUrls := wsConfig.Snapshots
 
 	shutdown := make(chan struct{})
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 	go func() {
 		<-interrupt
-		log.Println("interrupt")
+		slog.Info("interrupt...")
 		close(shutdown)
 	}()
 
 	var wg sync.WaitGroup
-	for _, u := range endpoints {
+	for idx, u := range wsEndpoints {
 		// where elements are URLs
 		// of endpoints to connect to.
 		wg.Add(1)
-		go connectToWebsocket(u, shutdown, &wg)
+		go connectToWebsocket(u, snapshotUrls[idx], shutdown, &wg)
 	}
 	wg.Wait()
 	return nil
@@ -120,6 +154,6 @@ func run() error {
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("Error running crypto order book service", slog.String("error", err.Error()))
+		slog.Error("Error running crypto order book service", slog.Any("error", err))
 	}
 }
