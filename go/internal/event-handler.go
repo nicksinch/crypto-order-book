@@ -3,22 +3,22 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 )
 
-// TODO: Ensure storage layout
 type Handler struct {
+	bestBid                  float64
+	bestAsk                  float64
 	snapshotLastUpdateId     int64
 	previousEventFinalUpdate int
 	tradingPairOb            *OrderBook
 	snapshotUrl              string
 	pairSymbol               string
 	firstEventProcessed      bool
-	bestBid                  float64
-	bestAsk                  float64
 }
 
 func InitializeHandler(tpSymbol string, snapshotUrl string) *Handler {
@@ -33,8 +33,10 @@ func InitializeHandler(tpSymbol string, snapshotUrl string) *Handler {
 	}
 }
 
+// HandleUpdate handles a single `depthUpdate` event maintaining the correct order book invariant
+// and calculates the values needed for indicators
 func (h *Handler) HandleUpdate(message []byte) error {
-	parseDepthUpdateEvent := DepthUpdateEvent{}
+	parseDepthUpdateEvent := depthUpdateEvent{}
 	if err := json.Unmarshal(message, &parseDepthUpdateEvent); err != nil {
 		return err
 	}
@@ -47,22 +49,23 @@ func (h *Handler) HandleUpdate(message []byte) error {
 			slog.LevelDebug,
 			"pu of current event not equal to u of last event. Reinitializing local order book managing...\n")
 		h.reinitializeSnapshot()
-		return nil // TODO: Is this the correct behavior ?
+		return nil
 	}
 	if !h.firstEventProcessed {
-		h.previousEventFinalUpdate = int(parseDepthUpdateEvent.Data.FinalUpdateId)
 		h.firstEventProcessed = true
 	}
 
-	bestAsk, tenthLevelAsk, err := h.tradingPairOb.UpdateAsks(parseDepthUpdateEvent.Data.AsksToBeUpdated)
+	bestAsk, tenthLevelAsk, oneUnitAsk, err := h.tradingPairOb.UpdateAsks(parseDepthUpdateEvent.Data.AsksToBeUpdated)
 	if err != nil {
 		return err
 	}
-	bestBid, tenthLevelBid, err := h.tradingPairOb.UpdateBids(parseDepthUpdateEvent.Data.BidsToBeUpdated)
+	bestBid, tenthLevelBid, oneUnitBid, err := h.tradingPairOb.UpdateBids(parseDepthUpdateEvent.Data.BidsToBeUpdated)
 	if err != nil {
 		return err
 	}
 
+	asset, _, _ := strings.Cut(h.pairSymbol, "usdt")
+	slog.Info(fmt.Sprintf("BUY 1 %s %v | SELL 1 %s %v", strings.ToUpper(asset), oneUnitBid, strings.ToUpper(asset), oneUnitAsk))
 	slog.Info("Spread between 10th order book level", slog.Float64("Value", tenthLevelAsk-tenthLevelBid), slog.String("Symbol", strings.ToUpper(h.pairSymbol)))
 
 	h.bestBid = bestBid
@@ -87,7 +90,7 @@ func (h *Handler) reinitializeSnapshot() {
 		slog.Int64("LastUpdateId", h.snapshotLastUpdateId))
 }
 
-func getDepthSnapshot(snapshotUrl string) *DepthSnapshot {
+func getDepthSnapshot(snapshotUrl string) *depthSnapshot {
 	resp, err := http.Get(snapshotUrl)
 	if err != nil {
 		slog.Error("Error getting snapshot", slog.String("snapshotUrl", snapshotUrl))
@@ -99,7 +102,7 @@ func getDepthSnapshot(snapshotUrl string) *DepthSnapshot {
 		slog.Error("Error reading snapshot response", slog.String("snapshotUrl", snapshotUrl))
 		return nil
 	}
-	snapshot := DepthSnapshot{}
+	snapshot := depthSnapshot{}
 	err = json.Unmarshal(body, &snapshot)
 	if err != nil {
 		slog.Error("Error unmarshalling depth snapshot", slog.String("snapshotUrl", snapshotUrl))

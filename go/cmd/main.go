@@ -21,8 +21,8 @@ const (
 	prefixFStreamApi = "wss://fstream.binance.com/stream?streams="
 )
 
-// connectToWebsocket connects to a single trading-pair websocket url
-func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.WaitGroup) {
+// subscribeToTradingPairWs connects to a single trading-pair websocket url and handles event updates
+func subscribeToTradingPairWs(u string, s string, shutdown chan struct{}, depth string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	slog.Info(fmt.Sprintf("connecting to %s", u))
@@ -41,7 +41,7 @@ func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.Wai
 		slog.Error("Couldn't cut prefix to take trading pair symbol")
 	}
 
-	tpSymbol, ok := strings.CutSuffix(tpSymbolAfter, "@depth@100ms")
+	tpSymbol, ok := strings.CutSuffix(tpSymbolAfter, "@depth@"+depth) // depth ms is configurable
 	if !ok {
 		slog.Error("Couldn't cut suffix to take trading pair symbol")
 	}
@@ -53,7 +53,7 @@ func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.Wai
 		for {
 			_, message, err := c.ReadMessage()
 			if err != nil {
-				log.Println("read:", err)
+				slog.Error("error reading websocket message:", slog.Any("error", err))
 				return
 			}
 			err = eventHandler.HandleUpdate(message)
@@ -66,12 +66,21 @@ func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.Wai
 	tickerMidPoint := time.NewTicker(time.Second)
 	defer tickerMidPoint.Stop()
 
-	tickerSma := time.NewTicker(60 * time.Second)
-	defer tickerSma.Stop()
+	tickerSmaEwma := time.NewTicker(60 * time.Second)
+	defer tickerSmaEwma.Stop()
 
 	simpleMovingAverageSum := 0.0
 	secondsCount := 0
 
+	// the alpha value for the exponentially moving average indicator
+	alphaEwma := 2/time.Minute.Seconds() + 1
+
+	// the aggregation of the ewma value for each second (will be printed when 60 seconds are reached)
+	var ewmaValue float64
+
+	previousEwmaValue := 0.0
+
+	// a goroutine to calculate the SMA and EWMA indicators as per the desired intervals
 	go func() {
 		for {
 			select {
@@ -81,10 +90,15 @@ func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.Wai
 				midPointPrice := (bestAsk - bestBid) / 2
 				simpleMovingAverageSum += midPointPrice
 				secondsCount++
-			case <-tickerSma.C:
+				ewmaValue += (alphaEwma * midPointPrice) + (1-alphaEwma)*previousEwmaValue
+				previousEwmaValue = ewmaValue
+			case <-tickerSmaEwma.C:
 				slog.Info("Simple Moving Average (SMA) for the last 60 seconds: ", slog.Float64("SMA", simpleMovingAverageSum/60), slog.String("Symbol", strings.ToUpper(tpSymbol)))
 				simpleMovingAverageSum = 0.0
 				secondsCount = 0
+				slog.Info("EWMA value for the last 60 seconds: ", slog.Float64("EWMA", ewmaValue), slog.String("Symbol", strings.ToUpper(tpSymbol)))
+				ewmaValue = 0.0
+				previousEwmaValue = 0.0
 			}
 		}
 	}()
@@ -97,10 +111,10 @@ func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.Wai
 		case <-done:
 			return
 		case <-ticker.C:
-			slog.Debug(fmt.Sprintf("%v sending a unsolicited pong frame.", time.Now().Format(time.RFC3339)))
+			slog.Debug(fmt.Sprintf("%v sending a pong frame.", time.Now().Format(time.RFC3339)))
 			err := c.WriteMessage(websocket.PongMessage, nil)
 			if err != nil {
-				log.Println("write:", err)
+				slog.Error("error sending pong message:", slog.Any("error", err))
 				return
 			}
 		case <-shutdown:
@@ -108,7 +122,7 @@ func connectToWebsocket(u string, s string, shutdown chan struct{}, wg *sync.Wai
 			// waiting (with timeout) for the server to close the connection.
 			err := c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			if err != nil {
-				log.Println("write close:", err)
+				slog.Error("error closing socket:", slog.Any("error", err))
 				return
 			}
 			select {
@@ -131,6 +145,7 @@ func run() error {
 
 	wsEndpoints := wsConfig.Pairs
 	snapshotUrls := wsConfig.Snapshots
+	depth := wsConfig.Depth
 
 	shutdown := make(chan struct{})
 	interrupt := make(chan os.Signal, 1)
@@ -146,7 +161,7 @@ func run() error {
 		// where elements are URLs
 		// of endpoints to connect to.
 		wg.Add(1)
-		go connectToWebsocket(u, snapshotUrls[idx], shutdown, &wg)
+		go subscribeToTradingPairWs(u, snapshotUrls[idx], shutdown, depth, &wg)
 	}
 	wg.Wait()
 	return nil

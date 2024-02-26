@@ -12,12 +12,12 @@ type eventData struct {
 	AsksToBeUpdated         []ask  `json:"a"`
 }
 
-type DepthUpdateEvent struct {
+type depthUpdateEvent struct {
 	Stream string    `json:"stream"`
 	Data   eventData `json:"data"`
 }
 
-type DepthSnapshot struct {
+type depthSnapshot struct {
 	LastUpdateId    int64 `json:"lastUpdateId"`
 	EventTime       int64 `json:"E"`
 	TransactionTime int64 `json:"T"`
