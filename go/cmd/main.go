@@ -48,7 +48,15 @@ func subscribeToTradingPairWs(u string, s string, shutdown chan struct{}, depth 
 
 	eventHandler = internal.InitializeHandler(tpSymbol, s)
 
-	go func() {
+	bestAskChan := make(chan float64, 1)
+	bestBidChan := make(chan float64, 1)
+	defer close(bestBidChan)
+	defer close(bestAskChan)
+
+	tickerMidPoint := time.NewTicker(time.Second)
+	defer tickerMidPoint.Stop()
+
+	go func(bestAskChan chan float64, bestBidChan chan float64, secondsChan *time.Ticker) {
 		defer close(done)
 		for {
 			_, message, err := c.ReadMessage()
@@ -56,37 +64,33 @@ func subscribeToTradingPairWs(u string, s string, shutdown chan struct{}, depth 
 				slog.Error("error reading websocket message:", slog.Any("error", err))
 				return
 			}
-			err = eventHandler.HandleUpdate(message)
+			err = eventHandler.HandleUpdate(message, bestAskChan, bestBidChan, secondsChan)
 			if err != nil {
 				slog.Error("Error handling order book update", slog.Any("error", err.Error()))
 			}
 		}
-	}()
-
-	tickerMidPoint := time.NewTicker(time.Second)
-	defer tickerMidPoint.Stop()
+	}(bestAskChan, bestBidChan, tickerMidPoint)
 
 	tickerSmaEwma := time.NewTicker(60 * time.Second)
 	defer tickerSmaEwma.Stop()
 
-	simpleMovingAverageSum := 0.0
-	secondsCount := 0
-
-	// the alpha value for the exponentially moving average indicator
-	alphaEwma := 2/time.Minute.Seconds() + 1
-
-	// the aggregation of the ewma value for each second (will be printed when 60 seconds are reached)
-	var ewmaValue float64
-
-	previousEwmaValue := 0.0
-
 	// a goroutine to calculate the SMA and EWMA indicators as per the desired intervals
 	go func() {
+		simpleMovingAverageSum := 0.0
+		secondsCount := 0
+
+		// the alpha value for the exponentially moving average indicator
+		alphaEwma := 2/time.Minute.Seconds() + 1
+
+		// the aggregation of the ewma value for each second (will be printed when 60 seconds are reached)
+		var ewmaValue float64
+
+		previousEwmaValue := 0.0
 		for {
 			select {
 			case <-tickerMidPoint.C:
-				bestAsk := eventHandler.GetBestAsk()
-				bestBid := eventHandler.GetBestBid()
+				bestAsk := <-bestAskChan
+				bestBid := <-bestBidChan
 				midPointPrice := (bestAsk - bestBid) / 2
 				simpleMovingAverageSum += midPointPrice
 				secondsCount++

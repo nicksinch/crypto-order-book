@@ -34,6 +34,16 @@ chmod +x ./build-and-run.sh
 - the calculation of the indicators can be delegated to a IndicatorManager so that integration of other indicators can be done easily
 - Understanding the data coming from Binance on a deeper level and based on that:
   - benchmark performance and experiment with different sorting strategies and data structures to improve speed trading-off some memory and vice versa
-- Such strategies may involve some more sophisticated data structures such as:
-  - Min/Max Heaps/Fibonacci Heaps (although there will be some challenges there due to the nature of this task)
-  - AVL self-balancing binary search trees to perform some of the required tasks if we observe tree balancing issues
+  - Such strategies may involve some more sophisticated data structures such as:
+    - Min/Max Heaps/Fibonacci Heaps (although there will be some challenges there due to the nature of this task)
+    - AVL self-balancing binary search trees to perform some of the required tasks if we observe tree balancing issues
+
+
+## Resources:
+- https://binance-docs.github.io/apidocs/futures/en/#partial-book-depth-streams
+- https://stanford.edu/~ashlearn/RLForFinanceBook/chapter9.pdf
+- https://github.com/sammchardy/python-binance/blob/master/binance/depthcache.py
+- https://dev.binance.vision/t/how-to-manage-a-local-order-book/9207
+- https://github.com/wisespace-io/binance-rs/issues/6
+- https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md#how-to-manage-a-local-order-book-correctly
+- https://web.archive.org/web/20110219163448/http://howtohft.wordpress.com/2011/02/15/how-to-build-a-fast-limit-order-book/
